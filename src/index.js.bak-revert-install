@@ -1,0 +1,208 @@
+import Resolver from '@forge/resolver';
+import { fetch, asApp, asUser, route } from '@forge/api';
+
+const resolver = new Resolver();
+const N8N_URL = 'https://vignesa.app.n8n.cloud/webhook/Sfview';
+
+// Account-shaped keys that must never be shown as "case detail".
+const ACCOUNT_KEYS = new Set([
+  'Salesforce Account Id', 'Salutation', 'Account Name', 'Account Email', 'Account Number',
+  'Jira Issue Key', 'RecordTypeId', 'PersonMailingStreet', 'PersonMailingPostalCode',
+  'PersonContactId', 'PersonMobilePhone', 'PersonBirthdate', 'Signup_Type__c',
+  'Cust_Account_Type__c', 'Nationality__c', 'Race__c', 'Citizenship__c', 'Account_ID__c',
+  'Username__c', 'Entity__c', 'Referral_Code__c', 'Zuora_Account_ID__c', 'Account_Status__pc',
+  'Sign_up_Date__c', 'Account_Active_Duration_Months__c', 'Type'
+]);
+
+const normalizeCaseNumber = (value) => String(value || '').replace(/\s+/g, ' ').trim().toLowerCase();
+
+const pickScalarFields = (obj) => {
+  const out = {};
+  if (!obj || typeof obj !== 'object') return out;
+  Object.keys(obj).forEach((key) => {
+    if (key === 'cases' || key === 'attributes' || key === 'found') return;
+    const val = obj[key];
+    if (val !== null && typeof val !== 'object') {
+      out[key] = val;
+    }
+  });
+  return out;
+};
+
+const extractInstallationDelivery = (obj) => {
+  const installation = {};
+  const delivery = {};
+  if (!obj || typeof obj !== 'object') {
+    return { installation, delivery };
+  }
+  Object.keys(obj).forEach((key) => {
+    const val = obj[key];
+    if (val === null || typeof val === 'object') return;
+    const lower = key.toLowerCase();
+    if (lower.includes('install') || lower.includes('activation') || lower.includes('rfs') || lower.includes('appointment')) {
+      installation[key] = val;
+    } else if (lower.includes('deliver') || lower.includes('shipping') || lower.includes('dispatch') || lower.includes('ont') || lower.includes('cpe')) {
+      delivery[key] = val;
+    }
+  });
+  return { installation, delivery };
+};
+
+const buildCaseDetailFromN8n = (json, requestedCaseNumber, listCaseItem) => {
+  const data = json?.data && typeof json.data === 'object' ? json.data : json;
+  const requested = normalizeCaseNumber(requestedCaseNumber);
+
+  // 1) Prefer an exact match inside data.cases[]
+  const cases = Array.isArray(data?.cases) ? data.cases : [];
+  const matchedFromList = cases.find((c) => normalizeCaseNumber(c.caseNumber || c.Case_ID__c || c.CaseNumber) === requested);
+
+  // 2) Top-level Case_ID__c / caseNumber only counts if it matches the click
+  const topCaseId = data?.Case_ID__c || data?.caseNumber || data?.['Case Number'] || data?.CaseNumber;
+  const topMatches = normalizeCaseNumber(topCaseId) === requested;
+
+  let caseFields = {};
+  let matched = false;
+  let matchSource = 'list-row';
+
+  if (matchedFromList) {
+    caseFields = pickScalarFields(matchedFromList);
+    matched = true;
+    matchSource = 'cases-array';
+  }
+
+  if (topMatches) {
+    // Merge case-ish top-level fields, skip account fields
+    const topScalars = pickScalarFields(data);
+    Object.keys(topScalars).forEach((key) => {
+      if (!ACCOUNT_KEYS.has(key)) {
+        caseFields[key] = topScalars[key];
+      }
+    });
+    matched = true;
+    matchSource = matchedFromList ? 'cases-array+top-level' : 'top-level';
+  }
+
+  // Always anchor identity on the clicked row so the popup never lies about which case it is
+  const anchored = {
+    'Case Number': requestedCaseNumber,
+    Subject: listCaseItem?.subject || caseFields.subject || caseFields.Subject || '',
+    Status: listCaseItem?.status || caseFields.status || caseFields.Status || '',
+    ...caseFields
+  };
+  // Force identity fields after spread
+  anchored['Case Number'] = requestedCaseNumber;
+  if (listCaseItem?.subject) anchored.Subject = listCaseItem.subject;
+  if (listCaseItem?.status) anchored.Status = listCaseItem.status;
+
+  const { installation, delivery } = extractInstallationDelivery({ ...data, ...caseFields, ...listCaseItem });
+
+  return {
+    found: true,
+    matched,
+    matchSource,
+    requestedCaseNumber,
+    data: anchored,
+    installation,
+    delivery,
+    warning: matched
+      ? null
+      : 'n8n did not return this case’s full detail yet; showing the selected case from the list. Installation/delivery appear when n8n includes those fields for the matched case.'
+  };
+};
+
+resolver.define('getSalesforceData', async (req) => {
+  const issueKey = req.context.extension.issue.key;
+  const searchTerm = req.payload?.search || '';
+
+  try {
+    const response = await fetch(N8N_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        accountNumber: searchTerm,
+        issueKey: issueKey,
+        objectType: 'Account'
+      })
+    });
+    if (!response.ok) return { error: `n8n error: ${response.status}` };
+    return await response.json();
+  } catch (error) {
+    return { error: 'Failed to reach n8n.' };
+  }
+});
+
+resolver.define('getCaseDetail', async (req) => {
+  const issueKey = req.context.extension.issue.key;
+  const caseNumber = req.payload?.caseNumber || '';
+  const accountNumber = req.payload?.accountNumber || '';
+  const listCaseItem = req.payload?.listCaseItem || null;
+
+  if (!caseNumber) {
+    return { error: 'Missing caseNumber' };
+  }
+
+  try {
+    const response = await fetch(N8N_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        accountNumber,
+        caseNumber,
+        issueKey,
+        objectType: 'Case',
+        // Hint for n8n: include installation + delivery fields on the matched case
+        include: ['installation', 'delivery', 'caseDetail']
+      })
+    });
+    if (!response.ok) return { error: `n8n error: ${response.status}` };
+    const json = await response.json();
+    if (!json || (typeof json === 'object' && !json.data && !json.found && Object.keys(json).length === 0)) {
+      return {
+        found: true,
+        matched: false,
+        requestedCaseNumber: caseNumber,
+        data: {
+          'Case Number': caseNumber,
+          Subject: listCaseItem?.subject || '',
+          Status: listCaseItem?.status || ''
+        },
+        installation: {},
+        delivery: {},
+        warning: 'No case detail returned from n8n; showing the selected list row.'
+      };
+    }
+    return buildCaseDetailFromN8n(json, caseNumber, listCaseItem);
+  } catch (error) {
+    return { error: 'Failed to reach n8n for case detail.' };
+  }
+});
+
+resolver.define('getIssueField', async (req) => {
+  const issueKey = req.context.extension.issue.key;
+  const response = await asUser().requestJira(route`/rest/api/3/issue/${issueKey}?fields=customfield_12911`);
+  const data = await response.json();
+  const fieldVal = data.fields?.customfield_12911;
+
+  if (Array.isArray(fieldVal)) {
+    return fieldVal[0] || null;
+  }
+  return fieldVal || null;
+});
+
+resolver.define('linkAccountToIssue', async (req) => {
+  const issueKey = req.context.extension.issue.key;
+  const { accountNumber } = req.payload;
+
+  const response = await asApp().requestJira(route`/rest/api/3/issue/${issueKey}`, {
+    method: 'PUT',
+    headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      fields: {
+        customfield_12911: accountNumber
+      }
+    })
+  });
+  return { success: response.status === 204 };
+});
+
+export const handler = resolver.getDefinitions();

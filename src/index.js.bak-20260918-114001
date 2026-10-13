@@ -1,0 +1,59 @@
+import Resolver from '@forge/resolver';
+import { fetch, asApp, asUser, route } from '@forge/api';  // <-- add 'route'
+
+const resolver = new Resolver();
+
+resolver.define('getSalesforceData', async (req) => {
+  const issueKey = req.context.extension.issue.key;
+  const searchTerm = req.payload?.search || '';
+  const n8nUrl = `https://vignesa.app.n8n.cloud/webhook/Sfview`;
+
+  try {
+    const response = await fetch(n8nUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        accountNumber: searchTerm,
+        issueKey: issueKey,
+        objectType: "Account"
+      })
+    });
+    if (!response.ok) return { error: `n8n error: ${response.status}` };
+    return await response.json(); 
+  } catch (error) {
+    return { error: 'Failed to reach n8n.' };
+  }
+});
+
+resolver.define('getIssueField', async (req) => {
+  const issueKey = req.context.extension.issue.key;
+  // <-- use route`...` instead of plain `...`
+  const response = await asUser().requestJira(route`/rest/api/3/issue/${issueKey}?fields=customfield_12911`);
+  const data = await response.json();
+  const fieldVal = data.fields?.customfield_12911;
+
+  // Safeguard: Extract cleanly if value arrives nested inside an array string
+  if (Array.isArray(fieldVal)) {
+    return fieldVal[0] || null;
+  }
+  return fieldVal || null;
+});
+
+resolver.define('linkAccountToIssue', async (req) => {
+  const issueKey = req.context.extension.issue.key;
+  const { accountNumber } = req.payload;
+  
+  // <-- use route`...` instead of plain `...`
+  const response = await asApp().requestJira(route`/rest/api/3/issue/${issueKey}`, {
+    method: 'PUT',
+    headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      fields: {
+        customfield_12911: accountNumber
+      }
+    })
+  });
+  return { success: response.status === 204 };
+});
+
+export const handler = resolver.getDefinitions();

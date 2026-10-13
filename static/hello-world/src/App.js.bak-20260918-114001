@@ -1,0 +1,242 @@
+import React, { useEffect, useState, useCallback } from 'react';
+import { events, invoke } from '@forge/bridge';
+import Spinner from '@atlaskit/spinner';
+
+const InfoRow = ({ label, value }) => (
+  <div style={{ 
+    display: 'flex', 
+    justifyContent: 'space-between', 
+    padding: '10px 0', 
+    borderBottom: '1px solid #f0f0f0', 
+    fontSize: '13px' 
+  }}>
+    <span style={{ color: '#6B778C', fontWeight: '500' }}>{label}</span>
+    <span style={{ color: '#172B4D', fontWeight: '400' }}>{value || '—'}</span>
+  </div>
+);
+
+function App() {
+  const [sfData, setSfData] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [searchTerm, setSearchTerm] = useState('');
+  const [activeTab, setActiveTab] = useState('TAB 1');
+  const [isLinking, setIsLinking] = useState(false);
+
+  const fetchData = useCallback((query = '') => {
+    if (!query) {
+      setSfData(null);
+      return;
+    }
+    setLoading(true);
+    invoke('getSalesforceData', { search: query })
+      .then((res) => {
+        setSfData(res?.data || null);
+        setLoading(false);
+      })
+      .catch((err) => {
+        console.error("Fetch error:", err);
+        setLoading(false);
+      });
+  }, []);
+
+  const handleLink = async () => {
+    if (!searchTerm) return;
+    setIsLinking(true);
+    try {
+      const res = await invoke('linkAccountToIssue', { accountNumber: searchTerm });
+      if (res.success) {
+        alert(`Account ${searchTerm} linked to this ticket.`);
+      }
+    } catch (err) {
+      console.error("Link error:", err);
+    } finally {
+      setIsLinking(false);
+    }
+  };
+
+  useEffect(() => {
+    const loadAppData = async () => {
+      const savedAccount = await invoke('getIssueField');
+      if (savedAccount) {
+        setSearchTerm(savedAccount);
+        fetchData(savedAccount);
+      } else {
+        setSearchTerm('');
+        setSfData(null);
+      }
+    };
+
+    loadAppData();
+
+    const sub = events.on('JIRA_ISSUE_CHANGED', () => {
+      loadAppData();
+    });
+
+    return () => sub.then(s => s.unsubscribe());
+  }, []); // Fixed infinite sync array loops
+
+  const getTabStyle = (tabName) => ({
+    padding: '8px 25px',
+    margin: '10px 5px 0 5px',
+    cursor: 'pointer',
+    fontSize: '12px',
+    fontWeight: 'bold',
+    color: activeTab === tabName ? '#000' : '#6B778C',
+    backgroundColor: activeTab === tabName ? '#fff' : '#f0f0f0',
+    border: '1px solid #4a90e2',
+    borderBottom: activeTab === tabName ? 'none' : '1px solid #4a90e2',
+    borderRadius: '8px 8px 0 0',
+    zIndex: activeTab === tabName ? 2 : 1,
+    position: 'relative',
+    bottom: activeTab === tabName ? '-1px' : '0px'
+  });
+
+  return (
+    <div style={{ 
+      backgroundColor: '#fff', 
+      minHeight: '500px', 
+      border: '2px solid #4a90e2', 
+      borderRadius: '4px', 
+      overflow: 'hidden',
+      fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif'
+    }}>
+      <div style={{ 
+        background: 'linear-gradient(to right, #4a90e2, #7ebffc)', 
+        color: 'white', 
+        padding: '15px 20px', 
+        display: 'flex', 
+        alignItems: 'center', 
+        justifyContent: 'space-between' 
+      }}>
+        <div style={{ display: 'flex', alignItems: 'center' }}>
+          <div style={{ 
+            background: 'white', borderRadius: '4px', width: '42px', height: '42px', 
+            marginRight: '15px', display: 'flex', justifyContent: 'center', 
+            alignItems: 'center', fontSize: '22px' 
+          }}>🏢</div>
+          <div>
+            <div style={{ fontSize: '14px', fontWeight: 'bold', textTransform: 'uppercase' }}>
+              {sfData?.["Account Name"] || 'COMPANY NAME'}
+            </div>
+            <div style={{ fontSize: '11px', opacity: 0.9 }}>
+              {sfData?.["Account Number"] || 'ACCOUNT NUMBER/NRIC/FIN'} | {sfData?.["Type"] || 'TYPE OF CUSTOMER CORP/RESI'}
+            </div>
+          </div>
+        </div>
+
+        <div style={{ display: 'flex', gap: '10px' }}>
+          <div style={{ position: 'relative' }}>
+            <input 
+              style={{ 
+                border: 'none', padding: '8px 35px 8px 12px', borderRadius: '4px', 
+                width: '240px', fontSize: '12px', color: '#333', outline: 'none' 
+              }}
+              placeholder="Search Account..."
+              value={searchTerm}
+              onChange={(e) => setSearchTerm(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && fetchData(searchTerm)}
+            />
+            <span style={{ 
+              position: 'absolute', right: '10px', top: '6px', 
+              color: '#4a90e2', cursor: 'pointer', fontSize: '18px' 
+            }} onClick={() => fetchData(searchTerm)}>🔍</span>
+          </div>
+          <button 
+            onClick={() => fetchData(searchTerm)} 
+            style={{ background: 'white', color: '#4a90e2', border: 'none', padding: '8px 16px', borderRadius: '4px', cursor: 'pointer', fontWeight: 'bold', fontSize: '12px' }}
+          >Refresh</button>
+          <button 
+            onClick={handleLink}
+            disabled={isLinking || !sfData}
+            style={{ background: '#0052CC', color: 'white', border: 'none', padding: '8px 16px', borderRadius: '4px', cursor: 'pointer', fontWeight: 'bold', fontSize: '12px', opacity: (isLinking || !sfData) ? 0.6 : 1 }}
+          >
+            {isLinking ? 'Linking...' : 'Link'}
+          </button>
+        </div>
+      </div>
+
+      <div style={{ display: 'flex', padding: '0 15px', background: '#d1e3f8', borderBottom: '1px solid #4a90e2' }}>
+        {['TAB 1', 'TAB 2', 'TAB 3', 'TAB 4', 'TAB 5', 'TAB 6'].map(tab => (
+          <div key={tab} style={getTabStyle(tab)} onClick={() => setActiveTab(tab)}>{tab}</div>
+        ))}
+      </div>
+
+      <div style={{ padding: '20px', background: '#fff' }}>
+        {loading ? (
+          <div style={{ display: 'flex', justifyContent: 'center', padding: '100px' }}>
+            <Spinner size="large" />
+          </div>
+        ) : (
+          <>
+            {activeTab === 'TAB 1' && (
+              <div>
+                <h4 style={{ color: '#6B778C', marginBottom: '15px', fontSize: '13px', borderBottom: '1px solid #ccc' }}>Account Information</h4>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '40px' }}>
+                  <div>
+                    <InfoRow label="Account Name" value={sfData?.["Account Name"]} />
+                    <InfoRow label="Account Number" value={sfData?.["Account Number"]} />
+                    <InfoRow label="Customer Type" value={sfData?.["Type"]} />
+                    <InfoRow label="Salesforce ID" value={sfData?.["Salesforce Account Id"]} />
+                  </div>
+                  <div>
+                    <InfoRow label="Email Address" value={sfData?.["Account Email"]} />
+                    <InfoRow label="Signup Type" value={sfData?.["Signup_Type__c"]} />
+                    <InfoRow label="Jira Issue Key" value={sfData?.["Jira Issue Key"]} />
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {activeTab === 'TAB 2' && (
+              <div style={{ padding: '10px' }}>
+                <h4 style={{ color: '#6B778C', marginBottom: '15px', fontSize: '13px', borderBottom: '1px solid #ccc' }}>
+                    Related Cases {sfData?.cases ? `(${sfData.cases.length})` : '(0)'}
+                </h4>
+                {sfData?.cases && sfData.cases.length > 0 ? (
+                  <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '12px' }}>
+                    <thead>
+                      <tr style={{ textAlign: 'left', borderBottom: '2px solid #4a90e2', color: '#4a90e2' }}>
+                        <th style={{ padding: '10px 5px' }}>Case Number</th>
+                        <th style={{ padding: '10px 5px' }}>Subject</th>
+                        <th style={{ padding: '10px 5px' }}>Status</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {sfData.cases.map((caseItem, index) => (
+                        <tr key={index} style={{ borderBottom: '1px solid #f0f0f0' }}>
+                          <td style={{ padding: '10px 5px', fontWeight: 'bold' }}>{caseItem.caseNumber}</td>
+                          <td style={{ padding: '10px 5px' }}>{caseItem.subject}</td>
+                          <td style={{ padding: '10px 5px' }}>
+                            <span style={{
+                                backgroundColor: caseItem.status === 'Closed' ? '#E3FCEF' : '#DEEBFF',
+                                color: caseItem.status === 'Closed' ? '#006644' : '#0747A6',
+                                padding: '2px 8px', borderRadius: '3px', fontWeight: 'bold', fontSize: '10px'
+                            }}>
+                                {caseItem.status?.toUpperCase()}
+                            </span>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                ) : (
+                  <div style={{ textAlign: 'center', padding: '50px', color: '#6B778C' }}>
+                    <p>No related cases found for this account.</p>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {['TAB 3', 'TAB 4', 'TAB 5', 'TAB 6'].includes(activeTab) && (
+              <div style={{ textAlign: 'center', padding: '100px', color: '#6B778C', fontStyle: 'italic' }}>
+                This section is currently blank.
+              </div>
+            )}
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+export default App;
